@@ -482,28 +482,44 @@
       (vec (map (fn [mn] {:time (max (:clock model) (:ends (:status mn))) ; Key idea!
                           :fn advance2buffer :args (list (:name mn))}) advance)))))
 
+(defn best-parallel
+  "Given a list of machines ready for work, return a filtered list:
+   If the machine is not in parallel, keep it.
+   If the machine is parallel with others, and one or more of the parallel are in the argument list,
+   choose one among these."
+  [model mnames]
+  (let [parallel (map set (filter vector? (:topology model)))
+        groups   (group-by (fn [mname] ; everything not parallel in nil, parallels indexed by set
+                             (some (fn [pset] (when (pset mname) pset)) parallel))
+                         mnames)]
+    (reduce (fn [result grp]
+              (conj result (rand-nth grp))) ; POD currently no rules for best
+            (vec (get groups nil))
+            (vals (dissoc groups nil)))))
+
 (defn advance2machine?
-  "Return actions to move jobs onto machine. Can be done now." 
+  "Return actions to move jobs onto machines. Can be done now." 
   [model]
   (let [entry-machine (:entry-point model)
         clock (:clock model)
         jm2dm? (:jm2dm model)
         blocked (:blocked model)
         starved (:starved model)
-        advance (filter #(let [m (:name %)]
-                           (and  ; Unless it was starved, :jm2dm doesn't matter.
-                            (or (util/up? %) jm2dm?)
-                            (not (= m entry-machine))
-                            (not (blocked m)) ; stronger than bbs/buffer-full. Prevents :sm>:ub
-                            (not (starved m)) ; Prevents :sm>:us. Both problems on same clock-tick.
-                            (not (util/occupied? %))
-                            (not (util/feed-buffer-empty? model %))
-                            (or (= :BAS (:discipline %))
-                                (and (= :BBS (:discipline %))
-                                     (not (util/buffer-full? model %))))))
-                        (machines model))]
+        candidates (filter #(let [m (:name %)]
+                              (and  ; Unless it was starved, :jm2dm doesn't matter.
+                               (or (util/up? %) jm2dm?)
+                               (not (= m entry-machine))
+                               (not (blocked m)) ; stronger than bbs/buffer-full. Prevents :sm>:ub
+                               (not (starved m)) ; Prevents :sm>:us. Both problems on same clock-tick.
+                               (not (util/occupied? %))
+                               (not (util/feed-buffer-empty? model %))
+                               (or (= :BAS (:discipline %))
+                                   (and (= :BBS (:discipline %))
+                                        (not (util/buffer-full? model %))))))
+                           (machines model))
+        advance (best-parallel model (map :name candidates))]
     (when (not-empty advance)
-      (vec (map (fn [mn] {:time clock :fn advance2machine :args (list (:name mn))}) advance)))))
+      (vec (map (fn [mn] {:time clock :fn advance2machine :args (list mn)}) advance)))))
 
 (defn get-time
   "(-> act :time) may be a number or a function that returns one."
@@ -588,8 +604,10 @@
                                  (assoc % :line-cnt 0)))
       (assoc ?m :jm2dm jm2dm)
       (assoc ?m :line (into (sorted-map) (map preprocess-equip (:line model))))
-      (assoc ?m :machines (filterv #(machine? (-> model :line %)) (:topology model)))
-      (assoc ?m :buffers  (filterv #(buffer?  (-> model :line %)) (:topology model)))
+      (assoc ?m :machines (filterv #(machine? (-> model :line %))
+                                   (->> model :topology flatten (remove #(= % :PARALLEL-OR)))))
+      (assoc ?m :buffers  (filterv #(buffer?  (-> model :line %))
+                                   (->> model :topology flatten (remove #(= % :PARALLEL-OR)))))
       (assoc ?m :clock 0.0)
       (assoc ?m :blocked #{})
       (assoc ?m :starved #{})
