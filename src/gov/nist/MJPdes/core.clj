@@ -482,21 +482,6 @@
       (vec (map (fn [mn] {:time (max (:clock model) (:ends (:status mn))) ; Key idea!
                           :fn advance2buffer :args (list (:name mn))}) advance)))))
 
-(defn best-parallel
-  "Given a list of machines ready for work, return a filtered list:
-   If the machine is not in parallel, keep it.
-   If the machine is parallel with others, and one or more of the parallel are in the argument list,
-   choose one among these."
-  [model mnames]
-  (let [parallel (map set (filter vector? (:topology model)))
-        groups   (group-by (fn [mname] ; everything not parallel in nil, parallels indexed by set
-                             (some (fn [pset] (when (pset mname) pset)) parallel))
-                         mnames)]
-    (reduce (fn [result grp]
-              (conj result (rand-nth grp))) ; POD currently no rules for best
-            (vec (get groups nil))
-            (vals (dissoc groups nil)))))
-
 (defn advance2machine?
   "Return actions to move jobs onto machines. Can be done now." 
   [model]
@@ -517,7 +502,7 @@
                                    (and (= :BBS (:discipline %))
                                         (not (util/buffer-full? model %))))))
                            (machines model))
-        advance (best-parallel model (map :name candidates))]
+        advance (util/best-parallel model (map :name candidates))]
     (when (not-empty advance)
       (vec (map (fn [mn] {:time clock :fn advance2machine :args (list mn)}) advance)))))
 
@@ -865,3 +850,27 @@
    Atom the-des-model gets updated in the process."
   [continuous-model n]
   (repeatedly n #(<!! (:log-chan continuous-model))))
+
+
+(def parallel
+  (map->Model ; a function call to make a Model from the following map argument
+   {:line     ; a key introducing the line
+    {:m1 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })  
+     :b1 (map->Buffer {:N 3})                              
+     :m2 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })
+     :b2 (map->Buffer {:N 5})
+     :m3-1 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })
+     :m3-2 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })
+     :m3-3 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 }) 
+     :b3 (map->Buffer {:N 1})                              
+     :m4 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 }) 
+     :b4 (map->Buffer {:N 1})
+     :m5 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })}
+    :topology [:m1 :b1 :m2 :b2 [:PARALLEL-OR :m3-1 :m3-2 :m3-3] :b3 :m4 :b4 :m5]
+    :report {:log? true :max-lines 1000}
+    :entry-point :m1
+    :params {:warm-up-time 2000 :run-to-time 20000}
+    :jobmix {:jobType1 (map->JobType {:portion 0.8
+                                      :w {:m1 1.0, :m2 1.0, :m3 3.0, :m4 1.0, :m5 1.0}})
+             :jobType2 (map->JobType {:portion 0.2
+                                      :w {:m1 1.0, :m2 1.0, :m3 3.6, :m4 1.0, :m5 1.0}})}}))

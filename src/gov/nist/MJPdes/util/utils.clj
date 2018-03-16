@@ -6,6 +6,8 @@
 
 (alias 'core 'gov.nist.MJPdes.core)
 
+(def ^:private diag (atom nil))
+
 ;;;=== General =========================
 (defn ppp []
   (binding [clojure.pprint/*print-right-margin* 140
@@ -40,22 +42,37 @@
                         (* dif dif)))
                     v)))))
 
+(defn pos-parallel
+  "Returns the position of the named equipment group
+  (e.g. equip is in a :PARALLEL-OR; what is the position of that vector?)"
+  [model equip]
+  (let [top ^clojure.lang.PersistentVector (:topology model)
+        paras (filter #(and (vector? %) (#{:PARALLEL-OR} (first %))) top)]
+    (when-let [para (some (fn [p] (some #(when (= equip %) p) p)) paras)]
+            (let [pos (.indexOf top para)]
+              (when (>= pos 0) pos)))))
+
 (defn buffers-to
   "Return the name of the buffer that the named machine buffers to.
    (Returns the thing after the argument.)"
   [model m-name]
   (let [^clojure.lang.PersistentVector top (:topology model)]
-    (when-let [pos (.indexOf top m-name)]
-      (when (< pos (dec (count top)))
-        (nth top (inc pos))))))
-
+    (let [pos (.indexOf top m-name)]
+      (if (not (neg? pos))
+        (when (< pos (dec (count top)))
+          (nth top (inc pos)))
+        (when-let [pos (pos-parallel model m-name)]
+          (nth top (inc pos)))))))
+        
 (defn takes-from
   "Return the buffer that the named machine takes work from."
   [model m-name]
   (let [^clojure.lang.PersistentVector top (:topology model)]
     (when-let [pos (.indexOf top m-name)]
-      (when (> pos 0)
-        (nth top (dec pos))))))
+      (if (pos? pos)
+        (nth top (dec pos))
+        (when-let [pos (pos-parallel model m-name)]
+          (nth top (dec pos)))))))
 
 (defn up? [mach]
   (s/assert ::core/ExpoMachine mach)
@@ -88,7 +105,8 @@
 
 (defn buffer-full? 
   "Returns true if the buffer that machine (arg is map) places completed work on is full."
-  [model mach] 
+  [model mach]
+  (reset! diag [model mach])
   (when-let [buf (get (:line model) (buffers-to model (:name mach)))] ; last machine cannot be blocked.
     (== (count (:holding buf)) (:N buf))))
 
@@ -117,14 +135,27 @@
 (defn upstream?
   "Returns true if equip1 is upstream of equip2"
   [model equip1 equip2]
-  (let [top ^clojure.lang.PersistentVector (:topology model)]
-    (and (not= equip1 equip2)
-         (some #(= % equip1) top)
-         (some #(= % equip2) top)
-         (< (.indexOf top equip1)
-            (.indexOf top equip2)))))
+  (let [top ^clojure.lang.PersistentVector (:topology model)
+        ix1 (.indexOf top equip1)
+        ix2 (.indexOf top equip2)
+        ix1 (if (>= ix1 0) ix1 (pos-parallel model equip1))
+        ix2 (if (>= ix2 0) ix2 (pos-parallel model equip2))]
+    (< ix1 ix2)))
 
-
+(defn best-parallel
+  "Given a list of machines ready for work, return a filtered list:
+   If the machine is not in parallel, keep it.
+   If the machine is parallel with others, and one or more of the parallel are in the argument list,
+   choose one among these."
+  [model mnames]
+  (let [parallel (map set (filter vector? (:topology model)))
+        groups   (group-by (fn [mname] ; everything not parallel in nil, parallels indexed by set
+                             (some (fn [pset] (when (pset mname) pset)) parallel))
+                         mnames)]
+    (reduce (fn [result grp]
+              (conj result (rand-nth grp))) ; POD currently no rules for best
+            (vec (get groups nil))
+            (vals (dissoc groups nil)))))
 
 
 
