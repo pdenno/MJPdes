@@ -157,8 +157,9 @@
 ;;;   o = {:act :sm, :bfm :b1 :j 1, :ends 1.833, :n 0, :clk 0.833} ; n is size before this action.
 ;;; BTW, at the end, these should sum to run-time. 
 (defn buf+ ; action is :bj
-  "Update results tracking time at the buffer size. Used with :bj (move of machine)." 
+  "Update results tracking time at the buffer size. Used with :bj (move off machine)." 
   [r o]
+  (reset! diag {:r r :o o})
   (-> r 
       (update-in [(:bf o) (:n o)] + (- (:clk o) (:lastclk ((:bf o) r))))
       (assoc-in  [(:bf o) :lastclk] (:clk o)))) ; This ends the clock
@@ -166,9 +167,10 @@
 (defn buf- ; :sm is not called for :m1
   "Update results tracking time at the buffer size. Used with :sm (start on machine)." 
   [r o]
+  (reset! diag {:r r :o o})
   (-> r ; :n value is from before the add. 
       (update-in [(:bf o) (:n o)] + (- (:clk o) (:lastclk ((:bf o) r))))
-      (assoc-in [(:bf o) :lastclk] (:clk o)))) ; This ends the clocl
+      (assoc-in [(:bf o) :lastclk] (:clk o)))) ; This ends the clock
 
 (defn block+ ; action is :bl
   "Start clock on machine for blocking."

@@ -29,6 +29,7 @@
 ;;; Possibly wasn't needed. 
 ;;; (set! *print-length* 30) 
 (def ^:private diag (atom nil))
+(def diag+ (atom nil))
 (def ^:private +defaults+
   {:jobs-move-to-down-machines? false
    :time-format "~10,4f"})
@@ -50,7 +51,7 @@
       (instance? Machine m)))
 
 (defn machines
-  "Return the machine maps of the model line."
+  "Return a list of machine objects in the model."
   [model]
   (let [line (:line model)]
     (map #(% line) (:machines model))))
@@ -93,7 +94,10 @@
 (s/def ::ExpoMachine (s/keys :req-un [::lambda ::mu ::W ::status ::up&down] :opt-un [::discipline]))
 
 (s/def ::N ::posint)
-(s/def ::Buffer (s/keys :req-un [::N]))
+(s/def ::holding vector?)
+(s/def ::Buffer (s/and (s/keys :req-un [::N ::holding])
+                       #(<= (-> % :holding count)
+                            (:N %))))
 
 (s/def ::event (s/tuple [number? #{:up :down} number?]))
 
@@ -289,15 +293,17 @@
         job  (:status mach)
         b?   (util/buffers-to model m)
         now  (:clock model)]
-    (as-> model ?m
-      (if b?
-        (log/log ?m {:act :bj :m m :bf b? :j (:id job) :n (count (-> ?m :line b? :holding))
-                     :clk now :dets (log/detail model)})
-        (log/log ?m {:act :ej :m (:name mach) :j (:id job) :ent (:enters job) 
-                     :clk now :dets (log/detail model)}))
-      (assoc-in ?m [:line m :status] nil)
-      (cond-> ?m
-        b? (update-in [:line b? :holding] conj job)))))
+    (if (util/buffer-full? model mach)
+      model
+      (as-> model ?m
+        (if b?
+          (log/log ?m {:act :bj :m m :bf b? :j (:id job) :n (count (-> ?m :line b? :holding))
+                       :clk now :dets (log/detail model)})
+          (log/log ?m {:act :ej :m (:name mach) :j (:id job) :ent (:enters job) 
+                       :clk now :dets (log/detail model)}))
+        (assoc-in ?m [:line m :status] nil)
+        (cond-> ?m
+          b? (update-in [:line b? :holding] conj job))))))
 
 ;;;=============== End of Actions ===============================================
 ;;;=============== Record-actions don't move jobs around. =======================
@@ -394,20 +400,21 @@
      (not (util/feed-buffer-empty? model mach)))))
 
 (defn blocked-check-time
-  "Most acts specify the time of occurrence; blocking can't. So it is done now."
+  "If blocking isn't going to happen because a contemporaneous runable
+   freed a buffer spot, return ##Inf otherwise end (BAS) or now (BBS)." 
   [model act]
   (let [m (-> act :args first)
         mach (-> model :line m)]
     (cond (= :BAS (-> model :line m :discipline))
           (if (and (util/buffer-full? model mach)
                    (util/occupied? mach))
-            (-> model :line m :status :ends)
+            (max (-> model :line m :status :ends) (:clock model)) ; 2018-03-16 
             ##Inf)
           (= :BBS (-> model :line m :discipline))
-          (if (and (not (util/occupied? mach))
+          (if (and (not (util/occupied? mach)) ; POD are there correct???
                    (not (util/feed-buffer-empty? model mach))
                    (util/buffer-full? model mach))
-            (:clock model)
+            (:clock model) 
             ##Inf))))
 
 (defn new-blocked?
@@ -419,7 +426,7 @@
                               (new-blocked-bas? model %)
                               (new-blocked-bbs? model %))
                            (:machines model))]
-    (when (not-empty new-block) 
+    (when (not-empty new-block)
       (vec (map (fn [m] {:time blocked-check-time ; that is, check when you see this.
                          :fn new-blocked :args (list m)}) new-block)))))
 
@@ -524,12 +531,12 @@
              (advance2buffer? model)
              (advance2machine? model) 
              (new-starved? model)  
-             (new-unstarved? model)  
-             (new-blocked? model)  
-             (new-unblocked? model))]
+             (new-unstarved? model)
+             (new-unblocked? model) ; 2018-03-16 was last
+             (new-blocked? model))]  
     (when (not-empty all)
       (let [min-time (apply min (map #(get-time model %) all))]
-        (filter #(= (get-time model %) min-time) all)))))
+        (filter #(== (get-time model %) min-time) all)))))
       
 (defn run-action
   "Run a single action, returning the model."
@@ -580,19 +587,24 @@
   "Add detail and check model for correctness. 
    Make line a sorted-map (if only for readability)."
   [model & {:keys [check?] :or {check? true}}]
-  (let [jm2dm (or (:jm2dm model) (:jobs-move-to-down-machines? +defaults+))] ; POD fix this?
+  (let [jm2dm (or (:jm2dm model) (:jobs-move-to-down-machines? +defaults+)) ; POD fix this?
+        equip (reduce (fn [result item]
+                        (if (map? item)
+                          (into result (:machines item))
+                          (conj result item)))
+                      []
+                      (:topology model))]
     (as-> model ?m
+      (update ?m :topology (fn [top] (mapv #(if (map? %) (update % :machines set) %) top)))
       (assoc ?m :log-buf [])
       (assoc ?m :diag-log-buf [])
-      (update-in ?m [:report] #(if (empty? %)
-                                 {:log? false :line-cnt 0 :max-lines 0}
-                                 (assoc % :line-cnt 0)))
+      (update ?m :report #(if (empty? %)
+                            {:log? false :line-cnt 0 :max-lines 0}
+                            (assoc % :line-cnt 0)))
       (assoc ?m :jm2dm jm2dm)
       (assoc ?m :line (into (sorted-map) (map preprocess-equip (:line model))))
-      (assoc ?m :machines (filterv #(machine? (-> model :line %))
-                                   (->> model :topology flatten (remove #(= % :PARALLEL-OR)))))
-      (assoc ?m :buffers  (filterv #(buffer?  (-> model :line %))
-                                   (->> model :topology flatten (remove #(= % :PARALLEL-OR)))))
+      (assoc ?m :machines (set (filter #(machine? (% (:line model))) equip)))
+      (assoc ?m :buffers  (set (filter #(buffer?  (% (:line model))) equip)))
       (assoc ?m :clock 0.0)
       (assoc ?m :blocked #{})
       (assoc ?m :starved #{})
@@ -639,13 +651,12 @@
 (defn calc-bneck
   "Update results with identification of bottlenecks."
   [res model]
-  (let [^clojure.lang.PersistentVector m-order (:machines model)]
+  (let [^clojure.lang.PersistentVector m-order (vec (:machines model))]
     (letfn [(mIndex [m] (inc (.indexOf m-order m)))
             (bl [i] (nth (vals (:blocked res)) (dec i)))
             (st [i] (nth (vals (:starved res)) (dec i)))]
       (let [candidates (filter #(when (not= % (last m-order))
                                   (< (bl (mIndex %)) (st (inc (mIndex %))))) m-order)]
-        ;(println ";Candidates =" candidates)
         (if (= 1 (count candidates))
           (assoc res :bottleneck-machine (first candidates))
           (let [mcnt  (count m-order)
@@ -658,7 +669,6 @@
                                  :else   (+ (Math/abs (- (bl (dec i)) (st i)))
                                             (Math/abs (- (bl i) (st (inc i)))))))
                              (range 1 (inc mcnt))))]
-            ;(println ";severity = " severity)
             (let [max-val (apply max (vals severity))]
               (assoc res :bottleneck-machine
                      (first (first (filter (fn [[k v]] (= v max-val)) severity)))))))))))
@@ -835,7 +845,6 @@
 (defn push-data-channel
   "Push data onto the log channel and park waiting for consumer."
   [model-atom chan]
-  (reset! diag {:model-atom model-atom :chan chan})
   (binding [log/*log-steady* (ref (log/steady-form @model-atom))] ; create a log for computations.
     (go-loop []
       (let [msg (-> @model-atom :print-buf first)]
@@ -851,26 +860,27 @@
   [continuous-model n]
   (repeatedly n #(<!! (:log-chan continuous-model))))
 
-
 (def parallel
-  (map->Model ; a function call to make a Model from the following map argument
-   {:line     ; a key introducing the line
-    {:m1 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })  
-     :b1 (map->Buffer {:N 3})                              
-     :m2 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })
-     :b2 (map->Buffer {:N 5})
-     :m3-1 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })
-     :m3-2 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })
-     :m3-3 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 }) 
-     :b3 (map->Buffer {:N 1})                              
-     :m4 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 }) 
-     :b4 (map->Buffer {:N 1})
-     :m5 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })}
-    :topology [:m1 :b1 :m2 :b2 [:PARALLEL-OR :m3-1 :m3-2 :m3-3] :b3 :m4 :b4 :m5]
-    :report {:log? true :max-lines 1000}
-    :entry-point :m1
-    :params {:warm-up-time 2000 :run-to-time 20000}
-    :jobmix {:jobType1 (map->JobType {:portion 0.8
-                                      :w {:m1 1.0, :m2 1.0, :m3 3.0, :m4 1.0, :m5 1.0}})
-             :jobType2 (map->JobType {:portion 0.2
-                                      :w {:m1 1.0, :m2 1.0, :m3 3.6, :m4 1.0, :m5 1.0}})}}))
+   (map->Model 
+    {:line     
+     {:m1 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })  
+      :b1 (map->Buffer {:N 3})                              
+      :m2 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })
+      :b2 (map->Buffer {:N 5})
+      :m3-1 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })
+      :m3-2 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })
+      :m3-3 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 }) 
+      :b3 (map->Buffer {:N 1})                              
+      :m4 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 }) 
+      :b4 (map->Buffer {:N 1})
+      :m5 (map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })}
+     :topology [:m1 :b1 :m2 :b2
+                {:type :parallel-or :name :m3 :machines [:m3-1 :m3-2 :m3-3]}
+                :b3 :m4 :b4 :m5]
+     :entry-point :m1
+     :report {:log? true :max-lines 200}
+     :params {:warm-up-time 200 :run-to-time 2000}
+     :jobmix {:jobType1 (map->JobType {:portion 0.8
+                                       :w {:m1 1.0, :m2 1.0, :m3 3.0, :m4 1.0, :m5 1.0}})
+              :jobType2 (map->JobType {:portion 0.2
+                                       :w {:m1 1.0, :m2 1.0, :m3 3.6, :m4 1.0, :m5 1.0}})}}))

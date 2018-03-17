@@ -21,7 +21,7 @@
       :m4 (core/map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 }) 
       :b4 (core/map->Buffer {:N 1})
       :m5 (core/map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })}
-     :topology [:m1 :b1 :m2 :b2 [:PARALLEL-OR :m3-1 :m3-2 :m3-3] :b3 :m4 :b4 :m5]
+     :topology [:m1 :b1 :m2 :b2 {:type :parallel-or :name :m3 :machines [:m3-1 :m3-2 :m3-3]} :b3 :m4 :b4 :m5]
      :entry-point :m1
      :params {:warm-up-time 2000 :run-to-time 20000}
      :jobmix {:jobType1 (core/map->JobType {:portion 0.8
@@ -29,12 +29,45 @@
               :jobType2 (core/map->JobType {:portion 0.2
                                             :w {:m1 1.0, :m2 1.0, :m3 3.6, :m4 1.0, :m5 1.0}})}})))
 
-(deftest test-best-parallel
-  (testing "that best-parallel eliminates all but one parallel machine."
-    (let [best (set (util/best-parallel parallel-test [:m1 :m2 :m3-1 :m3-2 :m3-3 :m4]))]
-      (is (or (= best #{:m1 :m2 :m3-1 :m4})
-              (= best #{:m1 :m2 :m3-2 :m4})
-              (= best #{:m1 :m2 :m3-3 :m4}))))))
+(deftest preprocessing
+  (testing "that pre-processing produces the right things"
+    (is (= (set (:machines parallel-test)) #{:m1 :m2 :m3-1 :m3-2 :m3-3 :m4 :m5}))
+    (is (= (set (:buffers  parallel-test)) #{:b1 :b2 :b3 :b4}))))
+
+(deftest work-required
+  (testing "that job-requires calulates the amount of work correctly (w/W)"
+    (let [job {:type :jobType1}]
+      (is (== 1.0 (util/job-requires parallel-test job :m1)))
+      (is (== 1.0 (util/job-requires parallel-test job :m2)))
+      (is (== 3.0 (util/job-requires parallel-test job :m3-1)))
+      (is (== 3.0 (util/job-requires parallel-test job :m3-2)))
+      (is (== 3.0 (util/job-requires parallel-test job :m3-3)))
+      (is (== 1.0 (util/job-requires parallel-test job :m4)))
+      (is (== 1.0 (util/job-requires parallel-test job :m5))))))
+
+(deftest next-machine-test
+  (testing "that next-machine? works"
+    (is (util/next-machine? parallel-test :m1 :m2))
+    (is (util/next-machine? parallel-test :m2 :m3-1))
+    (is (util/next-machine? parallel-test :m2 :m3-2))
+    (is (util/next-machine? parallel-test :m2 :m3-3))
+    (is (util/next-machine? parallel-test :m3-1 :m4))
+    (is (util/next-machine? parallel-test :m3-2 :m4))
+    (is (util/next-machine? parallel-test :m3-3 :m4))
+    (is (util/next-machine? parallel-test :m4 :m5))
+    (is (not (util/next-machine? parallel-test :m5 :m4)))))
+
+(deftest prev-machine-test
+  (testing "that prev-machine? works"
+    (is (util/prev-machine? parallel-test :m2 :m1))
+    (is (util/prev-machine? parallel-test :m3-1 :m2))
+    (is (util/prev-machine? parallel-test :m3-2 :m2))
+    (is (util/prev-machine? parallel-test :m3-3 :m2))
+    (is (util/prev-machine? parallel-test :m4 :m3-1))
+    (is (util/prev-machine? parallel-test :m4 :m3-2))
+    (is (util/prev-machine? parallel-test :m4 :m3-3))
+    (is (util/prev-machine? parallel-test :m5 :m4))
+    (is (not (util/prev-machine? parallel-test :m4 :m5)))))
 
 (deftest test-buffers-to
   (testing "that buffers-to does the right thing."
@@ -71,6 +104,12 @@
     (is (not (util/upstream? parallel-test :m2 :m1)))
     (is (not (util/upstream? parallel-test :m5 :m1)))))
 
+(deftest test-best-parallel
+  (testing "that best-parallel eliminates all but one parallel machine."
+    (let [best (set (util/best-parallel parallel-test [:m1 :m2 :m3-1 :m3-2 :m3-3 :m4]))]
+      (is (or (= best #{:m1 :m2 :m3-1 :m4})
+              (= best #{:m1 :m2 :m3-2 :m4})
+              (= best #{:m1 :m2 :m3-3 :m4}))))))
 
 #_(defn analyze-results [filename]
   "Read an output file and perform various calculations."

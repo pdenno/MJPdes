@@ -44,12 +44,12 @@
 
 (defn pos-parallel
   "Returns the position of the named equipment group
-  (e.g. equip is in a :PARALLEL-OR; what is the position of that vector?)"
+  (e.g. equip is part of a :parallel-or; what is the position of that equipment group?)"
   [model equip]
   (let [top ^clojure.lang.PersistentVector (:topology model)
-        paras (filter #(and (vector? %) (#{:PARALLEL-OR} (first %))) top)]
-    (when-let [para (some (fn [p] (some #(when (= equip %) p) p)) paras)]
-            (let [pos (.indexOf top para)]
+        paras (filter #(= (:type %) :parallel-or) top)]
+    (when-let [contains (some #(when ((:machines %) equip) %) paras)]
+            (let [pos (.indexOf top contains)]
               (when (>= pos 0) pos)))))
 
 (defn buffers-to
@@ -69,7 +69,7 @@
   [model m-name]
   (let [^clojure.lang.PersistentVector top (:topology model)]
     (when-let [pos (.indexOf top m-name)]
-      (if (pos? pos)
+      (if (not (neg? pos))
         (nth top (dec pos))
         (when-let [pos (pos-parallel model m-name)]
           (nth top (dec pos)))))))
@@ -91,31 +91,34 @@
         (>= (:clock model) (:ends status)))))
 
 (defn occupied?
-  "Returns true if machine (arg is map) has a a job (running or blocked)."
+  "Returns true if the machine (arg is map) has a a job (running or blocked)."
   [mach]
   (s/assert ::core/machine mach)
   (:status mach))
 
 (defn feed-buffer-empty? 
-  "Returns true if buffer feeding machine (arg is map) is empty."
-  [model mach] 
+  "Returns true if the buffer feeding machine (arg is map) is empty."
+  [model mach]
   (when (not= (:name mach) (:entry-point model))
     (let [buf (get (:line model) (takes-from model (:name mach)))]
-      (== (count (:holding buf)) 0))))
+      (== (-> buf :holding count) 0))))
 
 (defn buffer-full? 
-  "Returns true if the buffer that machine (arg is map) places completed work on is full."
+  "Returns true if the buffer that machine (arg is map) places work is full."
   [model mach]
-  (reset! diag [model mach])
   (when-let [buf (get (:line model) (buffers-to model (:name mach)))] ; last machine cannot be blocked.
-    (== (count (:holding buf)) (:N buf))))
+    (s/assert ::core/Buffer buf)
+    (== (-> buf :holding count) (:N buf))))
 
 (defn job-requires
   "Total time that job j requires on a machine m (arg is name), (w_{ij}/W_i)"
   [model j m]
-  (let [mach (-> model :line m)
-        W (or (:W mach) 1.0)
-        w (get (:w (get (:jobmix model) (:type j))) m)] 
+  (let [W (or (-> model :line m :W) 1.0)
+        mgroup (if-let [pos (pos-parallel model m)]  ; if the machine is in a group, then will
+                 (:name (nth (:topology model) pos)) ; need the name of the group to get :w. 
+                 m)
+        job-type (:type j)
+        w (-> model :jobmix job-type :w mgroup)]
     (/ w W)))
 
 (defn next-machine?
@@ -148,9 +151,9 @@
    If the machine is parallel with others, and one or more of the parallel are in the argument list,
    choose one among these."
   [model mnames]
-  (let [parallel (map set (filter vector? (:topology model)))
-        groups   (group-by (fn [mname] ; everything not parallel in nil, parallels indexed by set
-                             (some (fn [pset] (when (pset mname) pset)) parallel))
+  (let [parallels (filter #(= (:type %) :parallel-or) (:topology model))
+        groups    (group-by (fn [mname] ; everything not parallel in nil, parallels indexed by :name
+                              (some #(when ((:machines %) mname) (:name %)) parallels))
                          mnames)]
     (reduce (fn [result grp]
               (conj result (rand-nth grp))) ; POD currently no rules for best
