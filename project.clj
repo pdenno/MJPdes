@@ -3,10 +3,7 @@
   :url "https://github.com/usnistgov/MJPdes"
   :license {:name "See the github site for details"
             :url "https://github.com/usnistgov/MJPdes"}
-  :profiles {:uberjar {:aot :all}
-             ;:1.7 {:dependencies [[org.clojure/clojure "1.7.0"]]}
-             ;:1.8 {:dependencies [[org.clojure/clojure "1.8.0"]]}
-             :1.9 {:dependencies [[org.clojure/clojure "1.9.0"]]}}
+  :profiles {:uberjar {:aot :all}}
   :plugins [[lein-binplus "0.6.4"]]
   :dependencies [[org.clojure/clojure        "1.9.0"]
                  [org.clojure/core.async   "0.4.474"]
@@ -14,5 +11,4 @@
   :bin {:name "MJPdes"
         :bootclasspath false 
         :jvm-opts ["-server" "-Dfile.encoding=utf-8" "$JVM_OPTS" ]}
-  :aliases {"test-all" ["with-profile" "default" "test"]}
   :main gov.nist.MJPdes.main)

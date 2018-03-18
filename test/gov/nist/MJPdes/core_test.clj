@@ -4,10 +4,11 @@
             [clojure.pprint :refer (cl-format pprint)]
             [clojure.spec.alpha :as s]
             [clojure.spec.test.alpha :as stest]
+            [clojure.set :refer (union difference intersection)]
             [incanter.stats :as stats :refer (sample-exp)]
             [gov.nist.MJPdes.core :as core]
-            [gov.nist.MJPdes.util.log :as log]
-            [gov.nist.MJPdes.util.utils :as util]))
+            [gov.nist.MJPdes.util.log :as log]      
+            [gov.nist.MJPdes.util.utils :as util :refer (ppprint ppp)]))
 
 ;;; POD If you recompile core.clj after evaluating this, it won't happen. 
 (stest/instrument) ; Instrument everything
@@ -259,17 +260,19 @@
 (defn load-m1
   "No warm-up. M2 takes almost the whole simulation to process a part."
   []
-  (core/main-loop (core/map->Model
-              {:line ; POD if you go really crazy with lambda and mu it will hang. Not investigated!
-               {:m1 (core/map->ExpoMachine {:lambda 0.0001 :mu 100.0 :W 1.0}) 
-                :b1 (core/map->Buffer {:N 1})
-                :m2 (core/map->ExpoMachine {:lambda 0.0001 :mu 100.0 :W 1.0})}
-               :report {:log? true :max-lines 3000 :diag-log-buf? true}
-               :number-of-simulations 1
-               :topology [:m1 :b1 :m2]
-               :entry-point :m1
-               :params {:warm-up-time 0 :run-to-time 10}
-               :jobmix {:jobType1 (core/map->JobType {:portion 1.0 :w {:m1 2.0, :m2 5.0}})}})))
+  (with-out-str
+    (core/main-loop
+     (core/map->Model
+      {:line ; POD if you go really crazy with lambda and mu it will hang. Not investigated!
+       {:m1 (core/map->ExpoMachine {:lambda 0.0001 :mu 100.0 :W 1.0}) 
+        :b1 (core/map->Buffer {:N 1})
+        :m2 (core/map->ExpoMachine {:lambda 0.0001 :mu 100.0 :W 1.0})}
+       :report {:log? true :max-lines 3000 :diag-log-buf? true}
+       :number-of-simulations 1
+       :topology [:m1 :b1 :m2]
+       :entry-point :m1
+       :params {:warm-up-time 0 :run-to-time 10}
+       :jobmix {:jobType1 (core/map->JobType {:portion 1.0 :w {:m1 2.0, :m2 5.0}})}}))))
 
 ;;; Note I haven't finished this test, of course. :diag-log-buf? isn't working. 
 
@@ -358,6 +361,11 @@
                                       :w {:m1 1.0, :m2 1.0, :m3 1.0, :m4 1.0, :m5 1.0}})
              :jobType2 (map->JobType {:portion 0.2 ; 20% of jobs will be of type :jobType2.
                                       :w {:m1 1.0, :m2 1.0, :m3 1.3, :m4 1.0, :m5 1.0}})}}))
+
+;;; Stuff from sinet/scada.clj
+(declare job-map job-trace scada-patterns trim-patterns all-scada-patterns exceptional-msgs
+         scada-gather-job scada-all-job-ids machine-paths)
+
 (def des-model
    (core/map->Model 
     {:line     
@@ -385,14 +393,150 @@
 
 (deftest action-ordering
   (testing "that the log reports things in the correct order. (This one runs for a while.)"
-    (core/main-loop des-model)
-    (is (> (count @log/log-atom) 2900))))
+    (with-out-str (core/main-loop des-model))
+    (is (> (count @log/log-atom) 2900))
+    (let [log (-> @log/log-atom
+                  job-map
+                  scada-patterns
+                  exceptional-msgs
+                  machine-paths)]
+      (is (= (:machine-paths log)
+             #{[:m1 :m2 :m3-1 :m4 :m5]
+               [:m1 :m2 :m3-2 :m4 :m5]
+               [:m1 :m2 :m3-3 :m4 :m5]})))))
+
+;;;================================================================================================
+;;; So far, all this stuff below is used just for checking the order in which machines are visited.
+;;;================================================================================================
+(defn job-trace 
+  "Return all mentions of the job."
+  [log job-id]
+  (when-let [jcover (get (:job-map log) job-id)]
+    (->> (subvec (:raw log) (:starts jcover) (-> jcover :ends inc))
+         (remove #(and (contains? % :j) (not= (:j %) job-id)))
+         (remove #((:exceptional log) (:act %)))
+         vec)))
+             
+(defn scada-patterns 
+  "Compute the problem's SCADA patterns. It is a vector of maps with keys
+   (:id :form :njobs :relations). Run once per problem."
+  [log]
+  (let [raw (:raw log)]
+    (assoc log
+           :patterns
+           (as-> raw ?pats 
+             (all-scada-patterns ?pats)
+             (trim-patterns ?pats 5 5)
+             (map #(as-> % ?pat
+                     (assoc ?pat :njobs (count (:jobs ?pat)))
+                     (dissoc ?pat :jobs)) ; POD don't think the actual job will be useful.
+                  ?pats)))))
+
+(defn scada-gather-job
+  "Return a 'job trace', every mention of of job-id in chronological order."
+  [data job-id]
+  (filter  #(= (:j %) job-id) data)) ; POD this is not a very efficient implementation!
+
+(defn scada-all-job-ids
+  "Return a vector of all job-ids found in the data"
+  [data]
+  (sort (distinct (map :j (filter #(contains? % :j) data)))))
+
+(defn match-msg?
+  "Return true if msg matches form"
+  [msg form]
+  (every? (fn [key]
+           (or (and (= (key form) :*) (contains? msg key))
+               (= (key form) (key msg))))
+          (keys form)))
+
+(defn match-pattern?
+  "Return true if msgs matches pattern"
+  [msgs pattern]
+  (let [form (:form pattern)]
+    (and (= (count msgs) (count form))
+         (every? (fn [n] (match-msg? (nth msgs n) (nth form n)))
+                 (range (count form))))))
+
+(defn make-pattern
+  "Create a SCADA pattern; they look like this: {:act :m2-start-job, :bf :b1, :n :*}, 
+   {:act :ej, :m m1}..."
+  [msgs pattern-id]
+  {:id pattern-id
+   :form
+   (as-> msgs ?msgs
+     (map #(reduce (fn [msg key] (dissoc msg key)) ; remove unnecessary keys
+                   %
+                   (difference (set (keys %))
+                               #{:act :jt :bf :m :n}))  ; POD Long-term okay?
+          ?msgs)
+     (map #(reduce (fn [msg key] (if (contains? msg key) (assoc msg key :*) msg))
+                   % ; wildcard certain msg vals
+                   [:jt :n]) ; POD I ONLY WANT :jt and :n here
+          ?msgs)
+     (vec ?msgs))})
+       
+;;; POD Probably want start and stop point for every occurrence. 
+(defn all-scada-patterns
+  "Return a vector of all the job-trace patterns  found in the SCADA log.
+   A 'job-trace-pattern' only includes msgs that have a :j. Run once per problem at init."
+  [data]
+  (let [pattern-id (atom -1)]
+    (reduce (fn [patterns job-id]
+              (let [job (scada-gather-job data job-id) ; get a job trace
+                    matches (filter #(match-pattern? job %) patterns)] ; matches one already collected?
+                (if (empty? matches)  ; no, make a new pattern.
+                  (conj patterns (assoc (make-pattern job (swap! pattern-id inc)) :jobs [job-id]))
+                  (reduce (fn [patterns id] ; yes, just update the job count.
+                            (update-in patterns [id :jobs] #(conj % job-id)))
+                          patterns (map :id matches)))))
+            [] (scada-all-job-ids data))))
+
+(defn trim-patterns
+  "Trim up to ntrim patterns from the ends of the pattern vector if they account for only a few (njobs) jobs.
+   These are quite likely to be fragments of the complete log for these jobs. Run once per problem."
+  [patterns ntrim njobs]
+  (let [size (count patterns)]
+    (reduce (fn [patterns id]
+              (let [p (some #(when (= (:id %) id) %) patterns)]
+                (if (< (count (:jobs p)) njobs)
+                  (remove #(= % p) patterns)
+                  patterns)))
+            patterns
+            (into (range (- size ntrim) size) (range ntrim)))))
+
+(defn exceptional-msgs
+  "Return the set of the exceptional messages found in the scada log."
+  [log]
+  (let [patterns (:patterns log)
+        ordinary (set (mapcat (fn [pat] (map :act (:form pat))) patterns))]
+    (-> log
+        (assoc :ordinary ordinary)
+        (assoc :exceptional
+               (->> (reduce (fn [excepts msg]
+                              (if (ordinary (:act msg))
+                                excepts ; dissoc for distinct members
+                                (conj excepts (:act msg))))
+                            []
+                            (:raw log))
+                    set)))))
 
 
+(defn machine-paths [log]
+  "Return the sequence of machines visited by each whole job"
+  (assoc log :machine-paths
+         (reduce (fn [paths job-id]
+                   (conj paths
+                         (->> (job-trace log job-id)
+                              (map :m)
+                              dedupe
+                              vec)))
+                 #{}
+                 (->> log :job-map (map first)))))
 
 (defn job-map 
   "Return a map indexed by job-id and containing maps of where 
-   mention of that job starts and stops. The job must be whole."
+   mention of that job starts and stops. The job must be whole to be reported."
   [raw]
   (let [job-map (as-> {} ?jmap
                   (reduce (fn [jmap msg]
@@ -416,4 +560,5 @@
     (-> {}
         (assoc :raw raw)
         (assoc :job-map job-map))))
-    
+
+        

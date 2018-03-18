@@ -643,8 +643,8 @@
       (cond-> ?m (-> ?m :report :continuous?) preprocess-continuous-model)
       (if check?
         (if (contains? ?m :model-atom)
-          (do (spec-check-model (-> ?m :model-atom deref)) ?m)
-          (spec-check-model ?m))
+          (do (s/assert ::Model (-> ?m :model-atom deref)) ?m)
+          (s/assert ::Model ?m)) ; (spec-check-model ?m))
         ?m))))
 
 (defn calc-basics

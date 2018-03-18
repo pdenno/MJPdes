@@ -28,13 +28,15 @@
                (mapv :id (-> model :line buf-key :holding)))
              bufs))})))
 
+(def msg-id-cnt "Used to recover ordering after clean-log-buf" (atom 0))
+
 (defn log
   "Add to the log-buffer. On a clock tick it will be cleaned and written to log."
   [model msg-map]
   (let [keep? (or (-> model :report :up&down?)
                   (not (#{:up :down} (:act msg-map))))]
-    (cond-> model
-      keep? (update :log-buf #(conj % msg-map)))))
+    (cond-> model ; add :id to message here because clean-log-buf reorders randomly.
+      keep? (update :log-buf #(conj % (assoc msg-map :id (swap! msg-id-cnt inc)))))))
 
 (defn clean-log-buf
   "Remove acts that reverse themselves (i.e. :bl/:ub :st/us) in the argument collection.
@@ -55,7 +57,9 @@
                                   (conj accum v)))
                               [])))
                ?a)
-       (reduce #(into %1 %2) [] ?a)))
+       (reduce #(into %1 %2) [] ?a)
+       (sort-by :id ?a) ; group-by screws up ordering. Recover it with :id.  
+       (vec (map #(dissoc % :id) ?a))))
 
 (s/def ::act keyword?)
 (s/def ::clk float?)
@@ -66,7 +70,6 @@
                                    #(let [clk (-> % :args :buf first :clk)]
                                       (every? (fn [msg] (== clk (:clk %)))
                                               (-> % :args :buf)))))
-
 
 (declare buf+ buf- end-job block+ block- starve+ starve-)
 (defn add-compute-log! ; CIDER debugger has trouble with this!
