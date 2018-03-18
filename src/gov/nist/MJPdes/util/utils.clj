@@ -69,7 +69,7 @@
   [model m-name]
   (let [^clojure.lang.PersistentVector top (:topology model)]
     (when-let [pos (.indexOf top m-name)]
-      (if (not (neg? pos))
+      (if (pos? pos)
         (nth top (dec pos))
         (when-let [pos (pos-parallel model m-name)]
           (nth top (dec pos)))))))

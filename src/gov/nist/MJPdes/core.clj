@@ -50,11 +50,19 @@
       (instance? ReliableMachine m)
       (instance? Machine m)))
 
-(defn machines
-  "Return a list of machine objects in the model."
+(defn machines-sorted
+  "Return a vector of machine objects in the model in topological order."
   [model]
   (let [line (:line model)]
-    (map #(% line) (:machines model))))
+    (vec (map
+          #(% line) 
+          (sort #(util/upstream? model %1 %2) (:machines model))))))
+
+(defn machines
+  "Return a vector of machine objects in the model."
+  [model]
+  (let [line (:line model)]
+    (vec (map #(% line) (:machines model)))))
 
 (defrecord Buffer [N holding])
 (defrecord InfiniteBuffer [])
@@ -115,14 +123,22 @@
 
 (s/def ::max-lines (s/or :non-neg ::non-neg-int :infinite #(= % ##Inf)))
 (s/def ::log boolean?)
-(s/def ::report (s/keys :req-un [::log?] :opt-un [::max-lines]))
+(s/def ::report (s/and
+                 (s/keys :opt-un [::max-lines ::continuous? ::atom?])
+                 #(and (not (and (contains? % :continuous?) (contains? % :max-lines)))
+                       (not (and (contains? % :continuous?) (contains? % :atom?))))))
 
 ;(s/def ::number-of-simulations ::posint)
 (s/def ::jobmix (s/and (s/map-of keyword? ::JobType) #(>= (count %) 1)))
 (s/def ::machine (s/or :rmachine ::rmachine :emachine ::ExpoMachine))
 (s/def ::equipment (s/or :machine ::machine :buffer ::Buffer))
 (s/def ::line (s/and (s/map-of keyword? ::equipment) #(>= (count %) 3)))
-(s/def ::Model (s/keys :req-un [::line ::topology ::entry-point ::jobmix ::report ::params]))
+(s/def ::Model (s/and (s/keys :req-un [::line ::topology ::entry-point ::jobmix ::report ::params])
+                      #(and
+                        (or (contains? (:report %) :continuous?)
+                            (contains? (:report %) :max-lines))
+                        (or (contains? (:report %) :continuous?)
+                            (contains? (:params %) :run-to-time)))))
 
 (s/fdef advance-clock 
         :args (s/and (s/cat :model ::Model :new-clock ::non-neg)
@@ -600,7 +616,9 @@
       (assoc ?m :diag-log-buf [])
       (update ?m :report #(if (empty? %)
                             {:log? false :line-cnt 0 :max-lines 0}
-                            (assoc % :line-cnt 0)))
+                            (-> %
+                                (assoc :log? true)
+                                (assoc :line-cnt 0))))
       (assoc ?m :jm2dm jm2dm)
       (assoc ?m :line (into (sorted-map) (map preprocess-equip (:line model))))
       (assoc ?m :machines (set (filter #(machine? (% (:line model))) equip)))
@@ -651,17 +669,18 @@
 (defn calc-bneck
   "Update results with identification of bottlenecks."
   [res model]
-  (let [^clojure.lang.PersistentVector m-order (vec (:machines model))]
+  (let [^clojure.lang.PersistentVector m-order (vec (map :name (machines-sorted model)))]
     (letfn [(mIndex [m] (inc (.indexOf m-order m)))
             (bl [i] (nth (vals (:blocked res)) (dec i)))
             (st [i] (nth (vals (:starved res)) (dec i)))]
       (let [candidates (filter #(when (not= % (last m-order))
-                                  (< (bl (mIndex %)) (st (inc (mIndex %))))) m-order)]
+                                  (< (bl (mIndex %))
+                                     (st (inc (mIndex %))))) m-order)]
         (if (= 1 (count candidates))
           (assoc res :bottleneck-machine (first candidates))
           (let [mcnt  (count m-order)
                 ^clojure.lang.LazySeq severity
-                (zipmap (:machines model)
+                (zipmap m-order
                         (map (fn [i]
                                (cond
                                  (= i 1) (Math/abs (- (bl 1) (st 2)))
@@ -785,6 +804,7 @@
   (binding [*out* out-stream
             *print-length* 10]
     (print "#_")
+    (reset! log/log-atom [])
     (pprint (log/pretty-model model))
     (let [start (System/currentTimeMillis)
           job-end  (:run-to-job  (:params model))

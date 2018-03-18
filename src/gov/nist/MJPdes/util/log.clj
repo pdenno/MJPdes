@@ -7,6 +7,7 @@
 
 (def ^:dynamic *log-steady* "Collects essential data for steady-state calculations." nil)
 (def ^:private diag (atom nil))
+(def log-atom (atom []))
 
 (defn detail
   "Return a map of operation details including what jobs are in what machines or buffers."
@@ -108,21 +109,30 @@
               true (assoc :log-buf (-> parts :later vec))))
           model)))))
 
+(defn print-log-line
+  "Print the log line to *out* or conj to log-atom"
+  [to-atom? line fmt line-num]
+  (let [line (cl-format nil fmt
+                        (:clk line)
+                        (:act line)
+                        (-> (dissoc line :clk :act)
+                            (assoc :line line-num)
+                            vec
+                            flatten))]
+    (if to-atom?
+      (swap! log-atom conj (read-string line))
+      (cl-format *out* "~A~%" line))))
+
 (defn print-lines
   "pretty-print the lines, updating (-> model :report :line-cnt)."
   [model clean-buf]
-  (let [fmt (str "{:clk" (-> model :params :time-format) " :act " "~18A" "~{ ~A~}}~%")
-        buf (pretty-buf model clean-buf)]
+  (let [fmt (str "{:clk" (-> model :params :time-format) " :act " "~18A" "~{ ~A~}}")
+        buf (pretty-buf model clean-buf)
+        to-atom? (-> model :report :atom?)]
     (with-local-vars [line-num (-> model :report :line-cnt)]
       (when-not (-> model :report :continuous?)
         (run! (fn [line]
-                (cl-format *out* fmt
-                           (:clk line)
-                           (:act line)
-                           (-> (dissoc line :clk :act)
-                               (assoc :line @line-num)
-                               vec
-                               flatten))
+                (print-log-line to-atom? line fmt @line-num)
                 (var-set line-num (inc @line-num)))
               buf))
       (cond-> model

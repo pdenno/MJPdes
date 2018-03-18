@@ -2,6 +2,7 @@
   (:require [clojure.test :refer :all]
             [clojure.edn :as edn]
             [clojure.pprint :refer (cl-format pprint)]
+            [clojure.spec.alpha :as s]
             [clojure.spec.test.alpha :as stest]
             [incanter.stats :as stats :refer (sample-exp)]
             [gov.nist.MJPdes.core :as core]
@@ -213,7 +214,9 @@
      :entry-point :m1 ; 20,000 200,000
      :params {:warm-up-time 2000 :run-to-time 20000}  
      :jobmix {:jobType1 (core/map->JobType {:portion 1.0
-                                       :w {:m1 1.0, :m2 1.0, :m3 1.0, :m4 1.0, :m5 1.0}})}})))
+                                            :w {:m1 1.0, :m2 1.0, :m3 1.0, :m4 1.0, :m5 1.0}})}})))
+
+
 
 (def tp1 {:blocked
          {:m1 0.1860
@@ -230,16 +233,21 @@
 
 (def tp2 {:blocked
           {:m1 0.1501
-          :m2 0.0001
-          :m3 0.0258
-          :m4 0.0061
-          :m5 0.0},
-         :starved
+           :m2 0.0001
+           :m3 0.0258
+           :m4 0.0061
+           :m5 0.0},
+          :starved
          {:m1 0.0
           :m2 0.0001
           :m3 0.0578
           :m4 0.0371
           :m5 0.1501}})
+
+;;;; Arrows point to the lower value. This one (tp2) is :m2. 
+;;;       :m1          :m2          :m3          :m4          :m5
+;;; ST   0.0         0.0001       0.0578       0.0371        0.1501
+;;; BL   0.1501      0.0001       0.0258       0.0061        0.0
 
 (deftest bneck-test
   (testing "Check bottleneck identification"
@@ -350,3 +358,62 @@
                                       :w {:m1 1.0, :m2 1.0, :m3 1.0, :m4 1.0, :m5 1.0}})
              :jobType2 (map->JobType {:portion 0.2 ; 20% of jobs will be of type :jobType2.
                                       :w {:m1 1.0, :m2 1.0, :m3 1.3, :m4 1.0, :m5 1.0}})}}))
+(def des-model
+   (core/map->Model 
+    {:line     
+     {:m1 (core/map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })  
+      :b1 (core/map->Buffer {:N 3})                              
+      :m2 (core/map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })
+      :b2 (core/map->Buffer {:N 5})
+      :m3-1 (core/map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })
+      :m3-2 (core/map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })
+      :m3-3 (core/map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 }) 
+      :b3 (core/map->Buffer {:N 1})                              
+      :m4 (core/map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 }) 
+      :b4 (core/map->Buffer {:N 1})
+      :m5 (core/map->ExpoMachine {:lambda 0.1 :mu 0.9 :W 1.0 })}
+     :topology [:m1 :b1 :m2 :b2
+                {:type :parallel-or :name :m3 :machines [:m3-1 :m3-2 :m3-3]}
+                :b3 :m4 :b4 :m5]
+     :entry-point :m1
+     :report {:atom? true :max-lines 3000 :up&down? false}
+     :params {:warm-up-time 500 :run-to-time 1200}
+     :jobmix {:jobType1 (core/map->JobType {:portion 0.8
+                                       :w {:m1 1.0, :m2 1.0, :m3 3.0, :m4 1.0, :m5 1.0}})
+              :jobType2 (core/map->JobType {:portion 0.2
+                                            :w {:m1 1.0, :m2 1.0, :m3 3.6, :m4 1.2, :m5 1.0}})}}))
+
+(deftest action-ordering
+  (testing "that the log reports things in the correct order. (This one runs for a while.)"
+    (core/main-loop des-model)
+    (is (> (count @log/log-atom) 2900))))
+
+
+
+(defn job-map 
+  "Return a map indexed by job-id and containing maps of where 
+   mention of that job starts and stops. The job must be whole."
+  [raw]
+  (let [job-map (as-> {} ?jmap
+                  (reduce (fn [jmap msg]
+                            (if-let [job-id (:j msg)]
+                              (if (contains? jmap job-id)
+                                (assoc-in jmap [job-id :ends] (:line msg))
+                                (if (= (:mjpact msg) :aj) ; whole job started.
+                                  (assoc jmap job-id {:starts (:line msg)})
+                                  jmap))
+                              jmap))
+                          ?jmap
+                          raw)
+                  (reduce (fn [jmap job-id] ; whole job ended.
+                            (if-let [end-line (-> (get jmap job-id) :ends)]
+                              (if (= :ej (:mjpact (nth raw end-line)))
+                                jmap
+                                (dissoc jmap job-id))
+                              (dissoc jmap job-id)))
+                          ?jmap
+                          (keys ?jmap)))]
+    (-> {}
+        (assoc :raw raw)
+        (assoc :job-map job-map))))
+    

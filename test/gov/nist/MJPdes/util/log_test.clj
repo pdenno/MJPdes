@@ -10,7 +10,7 @@
             [gov.nist.MJPdes.util.log :as log]))
                         
 ;;; POD If you recompile nn.clj after evaluating this, it won't happen. 
-(stest/instrument) ; Instrument everything.
+;(stest/instrument) ; Instrument everything.
 
 (defn =* [x y tol] (< (- x tol) y (+ x tol)))
 
