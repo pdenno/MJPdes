@@ -858,4 +858,4 @@
   "Return n messages from the DES model. 
    Atom the-des-model gets updated in the process."
   [continuous-model n]
-  (repeatedly n #(<!! (:log-chan continuous-model))))
+  (vec (repeatedly n #(<!! (:log-chan continuous-model)))))

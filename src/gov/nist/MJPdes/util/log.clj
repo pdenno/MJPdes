@@ -269,20 +269,17 @@
     (assoc ?msg :mjpact (:act ?msg))
     (assoc ?msg :act (mjp2pretty-name ?msg))))
 
-;;; POD NOTE! If you fail to include a key here, the message printing gets
-;;;     messed up, with values not matched to the correct keys!
-(def msg-key-order "Order we want message keys to appear in printed logs"
-  [:clk :act :m :mjpact :bf :jt :n :ent :ends :j :dets :line])
-
 (defn msg-key-compare
   "Return true if k1 is before k2 in the sort order msg-key-order."
   [k1 k2]
-  (let [keys ^clojure.lang.PersistentVector msg-key-order]
-    (if (and (some #(= k1 %) msg-key-order)
-             (some #(= k2 %) msg-key-order))
-      (< (.indexOf keys k1)
-         (.indexOf keys k2))
-      false)))
+  (let [mkeys ^clojure.lang.PersistentVector
+        [:clk :act :m :mjpact :bf :jt :n :ent :ends :j :dets :line]
+        k1? (some #(= k1 %) mkeys)
+        k2? (some #(= k2 %) mkeys)]
+    (cond (and k1? k2?) (< (.indexOf mkeys k1) (.indexOf mkeys k2)),
+          k1? true,   ; comparator must produce a total ordering!
+          k2? false,
+          :else (neg? (compare (name k1) (name k2))))))
 
 (defn pretty-buf
   "translate items in buffer, truncate floats"
