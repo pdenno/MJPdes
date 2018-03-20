@@ -106,6 +106,7 @@
 (defn buffer-full? 
   "Returns true if the buffer that machine (arg is map) places work is full."
   [model mach]
+  ;(reset! core/diag+ {:model model :mach mach})
   (when-let [buf (get (:line model) (buffers-to model (:name mach)))] ; last machine cannot be blocked.
     (s/assert ::core/Buffer buf)
     (== (-> buf :holding count) (:N buf))))

@@ -125,8 +125,7 @@
 (s/def ::log boolean?)
 (s/def ::report (s/and
                  (s/keys :opt-un [::max-lines ::continuous? ::atom?])
-                 #(and (not (and (contains? % :continuous?) (contains? % :max-lines)))
-                       (not (and (contains? % :continuous?) (contains? % :atom?))))))
+                 #(not (and (contains? % :continuous?) (contains? % :atom?)))))
 
 ;(s/def ::number-of-simulations ::posint)
 (s/def ::jobmix (s/and (s/map-of keyword? ::JobType) #(>= (count %) 1)))
@@ -134,11 +133,8 @@
 (s/def ::equipment (s/or :machine ::machine :buffer ::Buffer))
 (s/def ::line (s/and (s/map-of keyword? ::equipment) #(>= (count %) 3)))
 (s/def ::Model (s/and (s/keys :req-un [::line ::topology ::entry-point ::jobmix ::report ::params])
-                      #(and
-                        (or (contains? (:report %) :continuous?)
-                            (contains? (:report %) :max-lines))
-                        (or (contains? (:report %) :continuous?)
-                            (contains? (:params %) :run-to-time)))))
+                      #(or (contains? (:report %) :continuous?)
+                           (contains? (:params %) :run-to-time))))
 
 (s/fdef advance-clock 
         :args (s/and (s/cat :model ::Model :new-clock ::non-neg)
@@ -615,7 +611,7 @@
       (assoc ?m :log-buf [])
       (assoc ?m :diag-log-buf [])
       (update ?m :report #(if (empty? %)
-                            {:log? false :line-cnt 0 :max-lines 0}
+                            {:log? false}
                             (-> %
                                 (assoc :log? true)
                                 (assoc :line-cnt 0))))
