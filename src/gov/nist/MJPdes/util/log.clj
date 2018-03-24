@@ -102,7 +102,7 @@
         (if (> max-time min-time) ; Time to log!
           (let [parts (group-by #(if (== (:clk %) min-time) :now :later) buf)
                 clean-buf (cond->> (:now parts)
-                            (not (:job-detail? model))  (mapv #(dissoc % :dets)),
+                            (not (-> model :report :job-detail?))  (mapv #(dissoc % :dets)),
                             (not-empty (:now parts))    (clean-log-buf))
                 warm-up (-> model :params :warm-up-time)]
             (when (>= min-time warm-up)
